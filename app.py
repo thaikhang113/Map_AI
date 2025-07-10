@@ -1,10 +1,12 @@
 from flask import Flask, render_template, request, jsonify
 import requests
 import time
+import math
+import random
 
 app = Flask(__name__)
 
-# --- Lõi thuật toán ---
+# --- Lõi thuật toán (Không thay đổi nhiều, chỉ cấu trúc lại) ---
 
 def get_coords_from_address(address):
     url = "https://nominatim.openstreetmap.org/search"
@@ -21,31 +23,20 @@ def get_coords_from_address(address):
     return None
 
 def get_route_info(coords_list):
-    """
-    Sử dụng OSRM API để lấy ma trận khoảng cách và thời gian.
-    **Đã thêm cơ chế thử lại (retry) để tăng độ ổn định.**
-    """
     locations_str = ";".join([f"{coord['lon']},{coord['lat']}" for coord in coords_list])
     url = f"http://router.project-osrm.org/table/v1/driving/{locations_str}"
     params = {'annotations': 'distance,duration'}
-    
-    # Thử lại tối đa 3 lần nếu có lỗi
     for attempt in range(3):
         try:
-            response = requests.get(url, params=params, timeout=15) # Tăng timeout lên 15s
-            response.raise_for_status() # Ném lỗi cho các mã HTTP 4xx/5xx
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
             data = response.json()
             if data['code'] == 'Ok':
                 return data['distances'], data['durations']
         except requests.exceptions.RequestException as e:
             print(f"Lỗi OSRM API (lần thử {attempt + 1}): {e}")
-            if attempt < 2: # Nếu chưa phải lần thử cuối, chờ 2 giây rồi thử lại
-                print("Đang thử lại sau 2 giây...")
-                time.sleep(2)
-    
-    # Nếu cả 3 lần đều thất bại
+            if attempt < 2: time.sleep(2)
     return None, None
-
 
 def calculate_total_distance(path_indices, dist_matrix):
     total_dist = 0
@@ -53,30 +44,39 @@ def calculate_total_distance(path_indices, dist_matrix):
         total_dist += dist_matrix[path_indices[i]][path_indices[i+1]]
     return total_dist
 
-def run_nearest_neighbor(coords_list, dist_matrix):
-    """Hàm riêng để chạy thuật toán Nearest Neighbor."""
+def run_2_opt_solver(coords_list, dist_matrix, avoid_segment_indices=None):
+    """Chạy chuỗi thuật toán Nearest Neighbor + 2-Opt, có thể tránh đường."""
+    if avoid_segment_indices:
+        from_idx, to_idx = avoid_segment_indices
+        dist_matrix[from_idx][to_idx] = float('inf')
+
+    # Chạy Nearest Neighbor để có giải pháp ban đầu
     num_locations = len(coords_list)
     start_node = 0
     current_node = start_node
     unvisited = list(range(1, num_locations))
-    path_indices = [start_node]
-    
+    initial_path_indices = [start_node]
     while unvisited:
         reachable_nodes = {node: dist_matrix[current_node][node] for node in unvisited if dist_matrix[current_node][node] != float('inf')}
-        if not reachable_nodes:
-            raise ValueError("Đồ thị không liên thông, không thể tìm thấy đường đi.")
-        
+        if not reachable_nodes: raise ValueError("Không thể tìm thấy lộ trình hợp lệ khi tránh đoạn đường đã chọn.")
         nearest_node = min(reachable_nodes, key=reachable_nodes.get)
         current_node = nearest_node
-        path_indices.append(current_node)
+        initial_path_indices.append(current_node)
         unvisited.remove(nearest_node)
-        
-    path_indices.append(start_node)
-    total_distance = calculate_total_distance(path_indices, dist_matrix)
-    return path_indices, total_distance
+    initial_path_indices.append(start_node)
+    
+    # Áp dụng 2-Opt
+    if len(coords_list) > 3:
+        best_path, best_dist = apply_2_opt(initial_path_indices, dist_matrix)
+    else:
+        best_path, best_dist = initial_path_indices, calculate_total_distance(initial_path_indices, dist_matrix)
+    
+    if best_dist == float('inf'):
+         raise ValueError("Không thể tìm thấy lộ trình hợp lệ khi tránh đoạn đường đã chọn.")
+         
+    return best_path, best_dist
 
 def apply_2_opt(initial_path_indices, dist_matrix):
-    """Áp dụng thuật toán 2-Opt để cải thiện lộ trình."""
     best_path = initial_path_indices[:]
     improved = True
     while improved:
@@ -90,45 +90,28 @@ def apply_2_opt(initial_path_indices, dist_matrix):
                     best_path[i:j] = best_path[j-1:i-1:-1]
                     improved = True
         initial_path_indices = best_path
-    final_distance = calculate_total_distance(best_path, dist_matrix)
-    return best_path, final_distance
+    return best_path, calculate_total_distance(best_path, dist_matrix)
 
-def solve_tsp_advanced(all_addresses_data, avoid_segment_indices=None):
-    """
-    Giải bài toán TSP, có tùy chọn tránh một đoạn đường.
-    """
-    coords_list = all_addresses_data
-    if len(coords_list) < 2:
-        return [], 0, 0, 0
-
-    dist_matrix, duration_matrix = get_route_info(coords_list)
-    if not dist_matrix:
-        raise ConnectionError("Không thể lấy dữ liệu tuyến đường từ OSRM API sau nhiều lần thử.")
-
-    # Chạy Nearest Neighbor trên ma trận GỐC để có giải pháp ban đầu
-    initial_path_indices, initial_distance = run_nearest_neighbor(coords_list, dist_matrix)
-    
-    if avoid_segment_indices:
-        from_idx, to_idx = avoid_segment_indices
-        dist_matrix[from_idx][to_idx] = float('inf')
-
-    # Áp dụng 2-Opt trên lộ trình ban đầu, nhưng với ma trận đã được sửa đổi.
-    if len(coords_list) > 3:
-        improved_path_indices, improved_distance = apply_2_opt(initial_path_indices, dist_matrix)
-    else:
-        improved_path_indices, improved_distance = initial_path_indices, initial_distance
-
-    if improved_distance == float('inf'):
-         raise ValueError("Không thể tìm thấy lộ trình hợp lệ khi tránh đoạn đường đã chọn.")
-
-    final_path_coords = [coords_list[i] for i in improved_path_indices]
-    
-    total_duration = 0
-    for i in range(len(improved_path_indices) - 1):
-        from_node, to_node = improved_path_indices[i], improved_path_indices[i+1]
-        total_duration += duration_matrix[from_node][to_node]
-
-    return final_path_coords, initial_distance, improved_distance, total_duration
+def run_sa_solver(coords_list, dist_matrix):
+    """Chạy thuật toán Simulated Annealing."""
+    current_solution = list(range(1, len(coords_list)))
+    random.shuffle(current_solution)
+    current_solution = [0] + current_solution + [0]
+    current_cost = calculate_total_distance(current_solution, dist_matrix)
+    best_solution, best_cost = current_solution[:], current_cost
+    temp, stopping_temp, alpha = 10000, 1, 0.995
+    while temp > stopping_temp:
+        i, j = random.sample(range(1, len(coords_list)), 2)
+        neighbor_solution = current_solution[:]
+        neighbor_solution[i], neighbor_solution[j] = neighbor_solution[j], neighbor_solution[i]
+        neighbor_cost = calculate_total_distance(neighbor_solution, dist_matrix)
+        cost_diff = neighbor_cost - current_cost
+        if cost_diff < 0 or random.uniform(0, 1) < math.exp(-cost_diff / temp):
+            current_solution, current_cost = neighbor_solution[:], neighbor_cost
+            if current_cost < best_cost:
+                best_solution, best_cost = current_solution[:], current_cost
+        temp *= alpha
+    return best_solution, best_cost
 
 # --- Routes ---
 
@@ -136,10 +119,7 @@ def solve_tsp_advanced(all_addresses_data, avoid_segment_indices=None):
 def home():
     default_data = {
         'kho_hang': 'Bưu điện Trung tâm Sài Gòn',
-        'cac_diem_giao': [
-            'Sân bay Tân Sơn Nhất', 'Chợ Bến Thành', 'Dinh Độc Lập', 
-            'Bảo tàng Chứng tích Chiến tranh', 'Chùa Bửu Long'
-        ]
+        'cac_diem_giao': ['Sân bay Tân Sơn Nhất', 'Chợ Bến Thành', 'Dinh Độc Lập', 'Bảo tàng Chứng tích Chiến tranh', 'Chùa Bửu Long']
     }
 
     if request.method == 'POST':
@@ -151,25 +131,37 @@ def home():
                 return render_template('index.html', error="Vui lòng nhập đủ địa chỉ.", form_data=default_data)
 
             all_addresses_text = [warehouse_address] + delivery_addresses
-            
             all_addresses_data = [get_coords_from_address(addr) for addr in all_addresses_text]
             if any(c is None for c in all_addresses_data):
                 failed_addr = all_addresses_text[all_addresses_data.index(None)]
                 raise ValueError(f"Không thể tìm thấy tọa độ cho địa chỉ: {failed_addr}")
 
-            final_path, initial_dist, improved_dist, total_duration = solve_tsp_advanced(all_addresses_data)
+            dist_matrix, _ = get_route_info(all_addresses_data)
+            if not dist_matrix:
+                raise ConnectionError("Không thể lấy dữ liệu từ OSRM API.")
+
+            results = []
+            # Chạy 2-Opt
+            start_time_2opt = time.time()
+            path_indices_2opt, dist_2opt = run_2_opt_solver(all_addresses_data, dist_matrix)
+            results.append({
+                "name": "NN + 2-Opt",
+                "path": [all_addresses_data[i] for i in path_indices_2opt],
+                "distance_km": dist_2opt / 1000.0,
+                "exec_time_ms": (time.time() - start_time_2opt) * 1000
+            })
+            # Chạy SA
+            start_time_sa = time.time()
+            path_indices_sa, dist_sa = run_sa_solver(all_addresses_data, dist_matrix)
+            results.append({
+                "name": "Simulated Annealing",
+                "path": [all_addresses_data[i] for i in path_indices_sa],
+                "distance_km": dist_sa / 1000.0,
+                "exec_time_ms": (time.time() - start_time_sa) * 1000
+            })
             
             form_data = {'kho_hang': warehouse_address, 'cac_diem_giao': delivery_addresses}
-
-            return render_template(
-                'index.html',
-                lo_trinh=final_path,
-                initial_dist_km=initial_dist / 1000.0,
-                improved_dist_km=improved_dist / 1000.0,
-                tong_thoi_gian_text=time.strftime("%H giờ %M phút", time.gmtime(total_duration)),
-                form_data=form_data,
-                all_addresses_data=all_addresses_data
-            )
+            return render_template('index.html', results=results, form_data=form_data, all_addresses_data=all_addresses_data)
         except (ValueError, ConnectionError) as e:
             return render_template('index.html', error=str(e), form_data=default_data)
     
@@ -177,6 +169,7 @@ def home():
 
 @app.route('/reroute', methods=['POST'])
 def reroute():
+    """API endpoint để tính toán lại tuyến đường khi có yêu cầu tránh một đoạn."""
     try:
         data = request.get_json()
         all_addresses_data = data.get('all_addresses_data')
@@ -185,18 +178,28 @@ def reroute():
         if not all_addresses_data or not avoid_segment:
             return jsonify({'error': 'Dữ liệu không hợp lệ'}), 400
 
+        dist_matrix, duration_matrix = get_route_info(all_addresses_data)
+        if not dist_matrix:
+            raise ConnectionError("Không thể lấy dữ liệu từ OSRM API.")
+            
         from_idx = next((i for i, item in enumerate(all_addresses_data) if item["display_name"] == avoid_segment['from']), -1)
         to_idx = next((i for i, item in enumerate(all_addresses_data) if item["display_name"] == avoid_segment['to']), -1)
         
-        if from_idx == -1 or to_idx == -1:
-            return jsonify({'error': 'Không tìm thấy địa chỉ cần tránh'}), 400
+        if from_idx == -1 or to_idx == -1: return jsonify({'error': 'Không tìm thấy địa chỉ cần tránh'}), 400
 
-        final_path, _, improved_dist, total_duration = solve_tsp_advanced(all_addresses_data, avoid_segment_indices=(from_idx, to_idx))
+        # Khi reroute, luôn dùng thuật toán 2-Opt nhanh và hiệu quả để có phản hồi tức thì
+        path_indices, distance = run_2_opt_solver(all_addresses_data, dist_matrix, avoid_segment_indices=(from_idx, to_idx))
+        
+        total_duration = 0
+        for i in range(len(path_indices) - 1):
+            total_duration += duration_matrix[path_indices[i]][path_indices[i+1]]
 
         response_data = {
-            'lo_trinh': final_path,
-            'improved_dist_km': improved_dist / 1000.0,
-            'tong_thoi_gian_text': time.strftime("%H giờ %M phút", time.gmtime(total_duration)),
+            'name': 'Tuyến đường thay thế (2-Opt)',
+            'path': [all_addresses_data[i] for i in path_indices],
+            'distance_km': distance / 1000.0,
+            'exec_time_ms': 0, # Không cần đo thời gian cho reroute
+            'total_duration_text': time.strftime("%H giờ %M phút", time.gmtime(total_duration))
         }
         return jsonify(response_data)
         
@@ -205,7 +208,6 @@ def reroute():
     except Exception as e:
         print(f"Lỗi không xác định khi reroute: {e}")
         return jsonify({'error': 'Lỗi phía server khi tính toán lại tuyến đường'}), 500
-
 
 if __name__ == '__main__':
     app.run(debug=True)
