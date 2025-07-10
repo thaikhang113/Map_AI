@@ -75,7 +75,7 @@
                         {% if results %}
                             {% for result in results %}
                             <div class="p-4 border rounded-lg {% if loop.first %}border-indigo-500 bg-indigo-50{% else %}border-gray-300{% endif %}">
-                                <h3 class="text-lg font-bold text-gray-800">{{ result.name }}</h3>
+                                <h3 class="text-lg font-bold text-gray-800">{{ result.name }} {% if loop.first %}<span class="text-sm text-white bg-indigo-500 px-2 py-1 rounded-full">Tốt nhất</span>{% endif %}</h3>
                                 <div class="mt-2 grid grid-cols-2 gap-4 text-sm">
                                     <div>
                                         <p class="font-medium text-gray-500">Quãng đường</p>
@@ -198,11 +198,9 @@
                     layerControl = null;
                 }
                 map.eachLayer(layer => {
-                    if (!!layer.toGeoJSON) {
-                         map.removeLayer(layer);
-                    }
+                    if (!!layer.toGeoJSON) { map.removeLayer(layer); }
                 });
-                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
 
                 if (!resultsData || resultsData.length === 0) return;
 
@@ -226,11 +224,9 @@
 
                         for (let i = 0; i < waypointIndices.length - 1; i++) {
                             const legCoordinates = route.coordinates.slice(waypointIndices[i], waypointIndices[i+1] + 1);
-                            
                             const legPolyline = L.polyline(legCoordinates, {
                                 color: colors[index % colors.length],
-                                weight: 6,
-                                opacity: 0.8
+                                weight: 6, opacity: 0.8
                             }).addTo(routeLayer);
 
                             legPolyline.on('mouseover', function() { this.setStyle({ weight: 10, opacity: 1 }); });
@@ -263,9 +259,9 @@
                 });
 
                 layerControl = L.control.layers(null, overlayMaps, { collapsed: false }).addTo(map);
-                map.addLayer(Object.values(overlayMaps)[0]);
+                Object.values(overlayMaps).forEach(layer => map.addLayer(layer));
             }
-
+            
             const modal = document.getElementById('reroute-modal');
             const confirmBtn = document.getElementById('confirm-reroute-btn');
             const cancelBtn = document.getElementById('cancel-reroute-btn');
@@ -301,13 +297,16 @@
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             all_addresses_data: allAddressesData,
-                            // **SỬA LỖI LOGIC:** Gửi đúng đoạn đường đã click
                             avoid_segment: { from: from, to: to }
                         })
                     });
-                    const newData = await response.json();
-                    if (!response.ok) throw new Error(newData.error || 'Lỗi không xác định');
                     
+                    if (!response.ok) {
+                        const errorData = await response.json().catch(() => ({ error: `Lỗi máy chủ: ${response.statusText}` }));
+                        throw new Error(errorData.error || 'Lỗi không xác định từ server.');
+                    }
+                    
+                    const newData = await response.json();
                     updateUIAfterReroute(newData);
 
                 } catch (error) {
