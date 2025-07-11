@@ -9,6 +9,9 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
     <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+    
+    <!-- **THƯ VIỆN MỚI**: Thêm Leaflet.PolylineDecorator để vẽ mũi tên -->
+    <script src="https://unpkg.com/leaflet-polylinedecorator@1.6.0/dist/leaflet.polylineDecorator.js"></script>
 
     <style>
         body { font-family: 'Inter', sans-serif; }
@@ -287,7 +290,7 @@
                 }).addTo(map);
             }
 
-            function drawRoutes(resultsData) {
+            function drawRoutes(resultsData, isReroute = false) {
                 if (layerControl) { map.removeControl(layerControl); layerControl = null; }
                 map.eachLayer(layer => { if (!!layer.toGeoJSON) { map.removeLayer(layer); } });
                 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
@@ -318,10 +321,22 @@
                                 color: colors[index % colors.length], weight: 6, opacity: 0.8
                             }).addTo(routeLayer);
 
+                            // **NÂNG CẤP**: Thêm mũi tên chỉ hướng
+                            L.polylineDecorator(legPolyline, {
+                                patterns: [{
+                                    offset: '15%',
+                                    repeat: '80px',
+                                    symbol: L.Symbol.arrowHead({
+                                        pixelSize: 12,
+                                        polygon: false,
+                                        pathOptions: { stroke: true, weight: 2, color: colors[index % colors.length] }
+                                    })
+                                }]
+                            }).addTo(routeLayer);
+
                             legPolyline.on('mouseover', function() { this.setStyle({ weight: 10, opacity: 1 }); });
                             legPolyline.on('mouseout', function() { this.setStyle({ weight: 6, opacity: 0.8 }); });
                             
-                            // SỬA LỖI: Chỉ gán sự kiện click nếu không phải chế độ lịch trình
                             if (formData.mode !== 'schedule') {
                                 legPolyline.on('click', function() {
                                     const fromAddress = result.path[i];
